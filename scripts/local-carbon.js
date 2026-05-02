@@ -87,6 +87,24 @@ const EXT_MAP = {
   json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'toml',
   md: 'markdown', html: 'html', css: 'css', sql: 'sql',
   dockerfile: 'dockerfile', tf: 'hcl', zig: 'zig',
+  php: 'php', http: 'http', log: 'log',
+};
+
+// Per-language built-in regex → color overrides, applied automatically.
+// Each rule = [pattern, colorSpec]. colorSpec is either:
+//   - a string "#hex"      → paint the whole match
+//   - an array [c0, c1, …] → c0 paints whole match, c1 paints capture group 1, etc.
+//                            Use null to skip a group.
+// User-supplied --rules entries are appended after these and override on overlap.
+const BUILTIN_LANG_RULES = {
+  http: [
+    // URL query-string punctuation (?, &, =) tinted accent — shiki leaves these plain
+    ['[?&=]',                        '#F97583'],
+    // Query param key (word right after ? or &) — same green as header names
+    ['(?<=[?&])[a-zA-Z_][\\w.-]*',   '#85E89D'],
+    // Query param value (after =, until & or whitespace) — same blue as header values
+    ['(?<==)[^&\\s]+',               '#9ECBFF'],
+  ],
 };
 
 function detectLang(filePath) {
@@ -132,25 +150,50 @@ async function main() {
   const fgColor = themeObj.fg || '#abb2bf';
 
   // ── Token post-processing: apply color-override rules ──
+  // Compile entries of form [pattern, colorSpec] into runtime rules.
+  // colorSpec is a string (whole-match) or an array indexed by capture group.
+  function compileRules(entries) {
+    return entries.map(([pattern, val]) => ({
+      regex: new RegExp(pattern, 'gd'),     // 'd' enables match.indices for capture groups
+      colors: Array.isArray(val) ? val : [val],
+    }));
+  }
+
+  const allRules = [];
+  if (BUILTIN_LANG_RULES[lang]) {
+    allRules.push(...compileRules(BUILTIN_LANG_RULES[lang]));
+  }
   if (opts.rulesFile) {
     const rulesJson = JSON.parse(fs.readFileSync(opts.rulesFile, 'utf-8'));
-    const rules = Object.entries(rulesJson).map(([pattern, color]) => ({
-      regex: new RegExp(pattern, 'g'),
-      color,
-    }));
+    allRules.push(...compileRules(Object.entries(rulesJson)));
+  }
 
+  if (allRules.length > 0) {
     tokens = tokens.map(lineTokens => {
       // Build flat text for this line
       const lineText = lineTokens.map(t => t.content).join('');
 
-      // Collect all match intervals: { start, end, color }
+      // Collect all colored intervals from every rule + capture group
       const intervals = [];
-      for (const rule of rules) {
+      for (const rule of allRules) {
         rule.regex.lastIndex = 0;
         let m;
         while ((m = rule.regex.exec(lineText)) !== null) {
           if (m[0].length === 0) break; // avoid infinite loop on zero-width match
-          intervals.push({ start: m.index, end: m.index + m[0].length, color: rule.color });
+          for (let g = 0; g < rule.colors.length; g++) {
+            const color = rule.colors[g];
+            if (color == null) continue;
+            let s, e;
+            if (g === 0) {
+              s = m.index;
+              e = m.index + m[0].length;
+            } else if (m.indices && m.indices[g]) {
+              [s, e] = m.indices[g];
+            } else {
+              continue;
+            }
+            intervals.push({ start: s, end: e, color });
+          }
         }
       }
 
